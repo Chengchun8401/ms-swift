@@ -1,12 +1,19 @@
 import asyncio
+import time
 from abc import ABC
 from copy import deepcopy
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-from swift.plugin import ContextManager, Env, context_managers, envs
-from swift.utils import remove_response
+import numpy as np
 
-if TYPE_CHECKING:
+from swift.plugin import ContextManager, Env, context_managers, envs
+from swift.plugin.tree_rollout import _repeat_list_interleave, _increment_tree_idx_depth, DataSampleTree, SampleStatus
+from swift.trainers.rlhf_trainer.vllm_client import VLLMClient
+from swift.utils import remove_response
+from tests.infer.test_tree_rollout_mock import simple_mock_vllm_response
+
+if True:
     from swift.llm.infer.protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, RequestConfig,
                                           RolloutOutput)
     from swift.llm.template import RolloutInferRequest
@@ -660,6 +667,203 @@ class GYMScheduler(RolloutScheduler):
             # Ensure environment is properly closed
             if env is not None:
                 await self._close_env_async(env)
+
+
+class TreeRolloutScheduler(MultiTurnScheduler):
+    def __init__(self,
+                 max_turns: Optional[int] = None,
+                 infer_engine: Optional['GRPOVllmEngine'] = None,
+                 max_tree_width: int = 8,
+                 max_tree_deep: int = 8,
+                 *args,
+                 **kwargs):
+        super().__init__(max_turns, infer_engine, *args, **kwargs)
+
+        self.max_tree_width = max_tree_width
+        self.max_tree_deep = max_tree_deep
+        self.default_step_width = 2
+
+    async def run(self,
+                  infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
+                  request_config: 'RequestConfig',
+                  vllm_client: VLLMClient = None,
+                  **kwargs
+                  ) -> List['RolloutOutput']:
+        assert vllm_client is not None, 'vLLM Client is must needed'
+
+        if isinstance(infer_request, RolloutInferRequest):
+            infer_request = [infer_request]
+        else:
+            infer_request = list(infer_request)
+
+        # 适配RolloutOutput字段要求，存放两份数据
+        finished_rollout_by_root: Dict[int, List[RolloutOutput]] = {i: [] for i in range(len(infer_request))}
+        finished_samples: Dict[int, List[DataSampleTree]] = {i: [] for i in range(len(infer_request))}
+
+        start_time = time.time()
+        samples_to_infer = []
+
+        for root_idx in range(len(infer_request)):
+            samples_to_infer.append(
+                DataSampleTree(
+                    tree_idx=str(root_idx),
+                    messages=infer_request[root_idx].messages,
+                    status=SampleStatus.TO_INFER
+                )
+            )
+
+        # first step
+        current_infer_step = 1
+        samples_to_infer = _repeat_list_interleave(samples_to_infer, self.default_step_width)
+        samples_to_infer = _increment_tree_idx_depth(samples_to_infer, current_infer_step)
+        step_start_times = [start_time]
+        step_efficiency_metrics = []
+
+        while len(samples_to_infer) > 0:
+            vllm_inputs = [RolloutInferRequest(messages=samples.messages) for samples in samples_to_infer]
+
+            res = vllm_client.infer(
+                [asdict(req) for req in vllm_inputs],
+                asdict(request_config),
+            )
+
+            if all(isinstance(output, RolloutOutput) for output in res):
+                outputs: List[ChatCompletionResponse] = [output.response for output in res]
+            else:
+                assert all(isinstance(output, ChatCompletionResponse) for output in res)
+                outputs: List[ChatCompletionResponse] = res
+
+            assert len(vllm_inputs) == len(
+                outputs), f"outputs length {len(outputs)} != inputs length {len(vllm_inputs)}"
+
+            current_step_end_time = time.time()
+            step_duration = current_step_end_time - step_start_times[-1]
+            step_start_times.append(current_step_end_time)
+            step_efficiency_metrics.append({
+                "step": current_infer_step,
+                "step_duration": step_duration,
+                "n_inputs": len(vllm_inputs),
+                "n_outputs": len(outputs),
+                "average_output_tokens": np.mean(
+                    [len(choice.token_ids) for output in outputs for choice in output.choices]),
+            })
+
+            samples_last_step = deepcopy(samples_to_infer)
+            samples_to_infer = []
+
+            # calc current finished count and active count by root node
+            finished_count = {key: len(value) for key, value in finished_samples.items()}
+            active_count = {key: 0 for key in finished_samples.keys()}
+
+            for sample, output in zip(samples_last_step, outputs):
+                if self.check_finished(sample, output):
+                    finished_count[sample.root_node] += 1
+                else:
+                    active_count[sample.root_node] += 1
+
+            for idx, (sample, output) in enumerate(zip(samples_last_step, outputs)):
+                assert len(output.choices) == 1, "vllm should only generate one output"
+
+                choice = output.choices[0]
+                response_id = choice.token_ids
+                response_text = choice.message.content
+                logprobs = [item['logprob'] for item in choice.logprobs['content']]
+
+                sample = deepcopy(sample)
+                sample.extend_response(response_id, response_text, logprobs)
+
+                if sample.status == SampleStatus.FINISHED:
+                    finished_samples[sample.root_node].append(sample)
+                    finished_rollout_by_root[sample.root_node].append(
+                        RolloutOutput(
+                            response=output,
+                            messages=deepcopy(sample.messages),
+                            response_token_ids=deepcopy(sample.all_response_ids)
+                        )
+                    )
+                else:
+                    self.step(sample, output)
+                    samples_to_infer.append(sample)
+
+                    # if we have budget, do fork
+                    allowed_slots = self.max_tree_width - finished_count[sample.root_node] - active_count[
+                        sample.root_node]
+                    if allowed_slots > 0:
+                        goto_deeper = [sample]
+                        fork_num = self.calc_fork_num(sample)
+                        goto_deeper = _repeat_list_interleave(goto_deeper, fork_num)
+                        add_count = min(allowed_slots, fork_num - 1)
+                        samples_to_infer.extend(goto_deeper[:add_count])
+                        active_count[sample.root_node] += add_count
+
+            # before end loop, if finished_count < max_tree_width, fall back
+            if len(samples_to_infer) == 0 and any(
+                count < self.max_tree_width for count in [len(value) for value in finished_samples.values()]):
+                samples_to_infer = self.fall_back(finished_samples)
+
+            current_infer_step += 1
+            samples_to_infer = _increment_tree_idx_depth(samples_to_infer, current_infer_step)
+
+
+        # flatten finished outputs
+        print(f"[Debug] Show the rollout metrics: {step_efficiency_metrics}")
+        print(f"[Debug] show tree_idx: ", [sample.tree_idx for samples in finished_samples.values() for sample in samples])
+        return [traj for lst in finished_rollout_by_root.values() for traj in lst]
+
+
+    def step(
+            self,
+            sample: DataSampleTree,
+            output: ChatCompletionResponse,
+            **kwargs
+    ):
+        if sample.status == SampleStatus.FINISH_NEXT_INFER:
+            prompt = 'In this round of responses, you must generate an answer.'
+        else:
+            prompt = 'The answer is not correct, It seems You made a mistake, you need to recheck very carefully.'
+
+        sample.messages.append({'role': 'user', 'content': prompt})
+
+
+    def check_finished(
+            self,
+            sample: DataSampleTree,
+            output: ChatCompletionResponse,
+            **kwargs
+    ) -> bool:
+        if sample.status == SampleStatus.FINISH_NEXT_INFER:
+            sample.status = SampleStatus.FINISHED
+        elif sample.depth >= self.max_tree_deep - 1:
+            sample.status = SampleStatus.FINISH_NEXT_INFER
+
+        return sample.status == SampleStatus.FINISHED
+
+
+    def calc_fork_num(self, data_sample: DataSampleTree):
+        # todo 更完善的分叉逻辑
+        return 2
+
+
+    def fall_back(self, finished_samples: Dict[int, List[DataSampleTree]]) -> List[DataSampleTree]:
+        print("[DEBUG] execute fall back, current finished_samples: ", {key: len(value) for key, value in finished_samples.items()})
+        sample_to_infer = []
+        for root_idx, sample_list in finished_samples.items():
+            if len(sample_list) >= self.max_tree_width:
+                continue
+
+            # todo 更完善的选择策略
+            diff_count = self.max_tree_width - len(sample_list)
+            import random
+
+            result = random.sample(sample_list, min(diff_count, len(sample_list)))
+
+            result_copy = deepcopy(result)
+            for sample in result_copy:
+                sample.status = SampleStatus.TO_INFER
+
+            sample_to_infer.extend(result_copy)
+
+        return sample_to_infer
 
 
 multi_turns = {
