@@ -20,6 +20,7 @@ class DataSampleTree:
 
     """
     tree_idx: str
+    request_id: str
 
     messages: Messages
     logprobs: List[List[float]] = field(default_factory=list)

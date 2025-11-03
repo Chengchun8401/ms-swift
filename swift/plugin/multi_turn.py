@@ -3,7 +3,7 @@ import time
 from abc import ABC
 from copy import deepcopy
 from dataclasses import asdict
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 import numpy as np
 
@@ -11,7 +11,6 @@ from swift.plugin import ContextManager, Env, context_managers, envs
 from swift.plugin.tree_rollout import _repeat_list_interleave, _increment_tree_idx_depth, DataSampleTree, SampleStatus
 from swift.trainers.rlhf_trainer.vllm_client import VLLMClient
 from swift.utils import remove_response
-from tests.infer.test_tree_rollout_mock import simple_mock_vllm_response
 
 if True:
     from swift.llm.infer.protocol import (ChatCompletionResponse, ChatCompletionResponseChoice, RequestConfig,
@@ -674,7 +673,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                  max_turns: Optional[int] = None,
                  infer_engine: Optional['GRPOVllmEngine'] = None,
                  max_tree_width: int = 8,
-                 max_tree_deep: int = 8,
+                 max_tree_deep: int = 4,
                  vllm_client: VLLMClient = None,
                  *args,
                  **kwargs):
@@ -687,16 +686,18 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
         assert vllm_client is not None, 'vLLM Client can not be none.'
 
-    async def run(self,
-                  infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
-                  request_config: 'RequestConfig',
-                  **kwargs
-                  ) -> List['RolloutOutput']:
+    def run(self,
+            infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
+            request_config: 'RequestConfig',
+            **kwargs
+            ) -> List['RolloutOutput']:
 
         if isinstance(infer_request, RolloutInferRequest):
             infer_request = [infer_request]
         else:
             infer_request = list(infer_request)
+
+        print(f"[Debug] Tree Rollout Ready to Infer: {len(infer_request)}")
 
         # 适配RolloutOutput字段要求，存放两份数据
         finished_rollout_by_root: Dict[int, List[RolloutOutput]] = {i: [] for i in range(len(infer_request))}
@@ -709,20 +710,21 @@ class TreeRolloutScheduler(MultiTurnScheduler):
             samples_to_infer.append(
                 DataSampleTree(
                     tree_idx=str(root_idx),
+                    request_id=infer_request[root_idx].uuid,
                     messages=infer_request[root_idx].messages,
                     status=SampleStatus.TO_INFER
                 )
             )
 
         # first step
-        current_infer_step = 1
+        next_infer_step = 1
         samples_to_infer = _repeat_list_interleave(samples_to_infer, self.default_step_width)
-        samples_to_infer = _increment_tree_idx_depth(samples_to_infer, current_infer_step)
+        samples_to_infer = _increment_tree_idx_depth(samples_to_infer, next_infer_step)
         step_start_times = [start_time]
         step_efficiency_metrics = []
 
         while len(samples_to_infer) > 0:
-            vllm_inputs = [RolloutInferRequest(messages=samples.messages) for samples in samples_to_infer]
+            vllm_inputs = [RolloutInferRequest(messages=sample.messages, uuid=sample.request_id) for sample in samples_to_infer]
 
             res = self.vllm_client.infer(
                 [asdict(req) for req in vllm_inputs],
@@ -742,7 +744,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
             step_duration = current_step_end_time - step_start_times[-1]
             step_start_times.append(current_step_end_time)
             step_efficiency_metrics.append({
-                "step": current_infer_step,
+                "step": next_infer_step,
                 "step_duration": step_duration,
                 "n_inputs": len(vllm_inputs),
                 "n_outputs": len(outputs),
@@ -765,6 +767,9 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
             for idx, (sample, output) in enumerate(zip(samples_last_step, outputs)):
                 assert len(output.choices) == 1, "vllm should only generate one output"
+
+                # bind the output and request
+                output.id = sample.request_id
 
                 choice = output.choices[0]
                 response_id = choice.token_ids
@@ -800,18 +805,15 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
             # before end loop, if finished_count < max_tree_width, fall back
             if len(samples_to_infer) == 0 and any(
-                count < self.max_tree_width for count in [len(value) for value in finished_samples.values()]):
+                    count < self.max_tree_width for count in [len(value) for value in finished_samples.values()]):
                 samples_to_infer = self.fall_back(finished_samples)
 
-            current_infer_step += 1
-            samples_to_infer = _increment_tree_idx_depth(samples_to_infer, current_infer_step)
-
+            print(f"【Debug】next step: {next_infer_step}, infer num: {len(samples_to_infer)}")
+            next_infer_step += 1
+            samples_to_infer = _increment_tree_idx_depth(samples_to_infer, next_infer_step)
 
         # flatten finished outputs
-        print(f"[Debug] Show the rollout metrics: {step_efficiency_metrics}")
-        print(f"[Debug] show tree_idx: ", [sample.tree_idx for samples in finished_samples.values() for sample in samples])
         return [traj for lst in finished_rollout_by_root.values() for traj in lst]
-
 
     def step(
             self,
@@ -826,7 +828,6 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
         sample.messages.append({'role': 'user', 'content': prompt})
 
-
     def check_finished(
             self,
             sample: DataSampleTree,
@@ -840,14 +841,11 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
         return sample.status == SampleStatus.FINISHED
 
-
     def calc_fork_num(self, data_sample: DataSampleTree):
         # todo 更完善的分叉逻辑
         return 2
 
-
     def fall_back(self, finished_samples: Dict[int, List[DataSampleTree]]) -> List[DataSampleTree]:
-        print("[DEBUG] execute fall back, current finished_samples: ", {key: len(value) for key, value in finished_samples.items()})
         sample_to_infer = []
         for root_idx, sample_list in finished_samples.items():
             if len(sample_list) >= self.max_tree_width:
