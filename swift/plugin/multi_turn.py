@@ -675,6 +675,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                  infer_engine: Optional['GRPOVllmEngine'] = None,
                  max_tree_width: int = 8,
                  max_tree_deep: int = 8,
+                 vllm_client: VLLMClient = None,
                  *args,
                  **kwargs):
         super().__init__(max_turns, infer_engine, *args, **kwargs)
@@ -682,14 +683,15 @@ class TreeRolloutScheduler(MultiTurnScheduler):
         self.max_tree_width = max_tree_width
         self.max_tree_deep = max_tree_deep
         self.default_step_width = 2
+        self.vllm_client = vllm_client
+
+        assert vllm_client is not None, 'vLLM Client can not be none.'
 
     async def run(self,
                   infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
                   request_config: 'RequestConfig',
-                  vllm_client: VLLMClient = None,
                   **kwargs
                   ) -> List['RolloutOutput']:
-        assert vllm_client is not None, 'vLLM Client is must needed'
 
         if isinstance(infer_request, RolloutInferRequest):
             infer_request = [infer_request]
@@ -722,7 +724,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
         while len(samples_to_infer) > 0:
             vllm_inputs = [RolloutInferRequest(messages=samples.messages) for samples in samples_to_infer]
 
-            res = vllm_client.infer(
+            res = self.vllm_client.infer(
                 [asdict(req) for req in vllm_inputs],
                 asdict(request_config),
             )

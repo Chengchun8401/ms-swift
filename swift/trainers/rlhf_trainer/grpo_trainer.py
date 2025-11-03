@@ -140,9 +140,14 @@ class GRPOTrainer(RolloutTrainerMixin, SwiftMixin, HFGRPOTrainer):
     def _get_train_sampler(self, train_dataset=None):
         if self.template.sequence_parallel_size > 1:
             from swift.trainers.sequence_parallel import sequence_parallel
+            if self.args.tree_rollout:
+                mini_repeat_count = 1
+            else:
+                mini_repeat_count = self.num_generations
+
             return RepeatSampler(
                 data_source=train_dataset or self.train_dataset,
-                mini_repeat_count=self.num_generations,
+                mini_repeat_count=mini_repeat_count,
                 batch_size=self.args.generation_batch_size // self.num_generations,
                 repeat_count=self.num_iterations * self.args.steps_per_generation * sequence_parallel.world_size,
                 shuffle=self.shuffle_dataset,

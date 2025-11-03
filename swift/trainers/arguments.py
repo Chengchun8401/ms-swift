@@ -147,6 +147,9 @@ class RLHFArgumentsMixin:
     chord_mu_peak: Optional[float] = None
     chord_mu_valley: Optional[float] = None
 
+    # TreePO
+    tree_rollout: bool = False
+
 
 @dataclass
 class SwiftArgumentsMixin(RLHFArgumentsMixin, TrainArgumentsMixin):

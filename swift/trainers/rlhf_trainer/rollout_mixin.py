@@ -723,8 +723,12 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             return []
 
         if self.accelerator.is_main_process:
-            all_outputs: List[RolloutOutput] = self._engine_infer(
-                infer_requests=all_requests, request_config=request_config)
+            if self.args.tree_rollout:
+                all_outputs: List[RolloutOutput] = self.multi_turn_scheduler.run(infer_request=all_requests,
+                                                                                 request_config=request_config)
+            else:
+                all_outputs: List[RolloutOutput] = self._engine_infer(
+                    infer_requests=all_requests, request_config=request_config)
             if len(all_outputs) != len(all_requests):
                 all_outputs = self._sort_by_request_id(all_outputs)
         else:
@@ -928,15 +932,16 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if not hasattr(args, 'multi_turn_scheduler'):
             # only GRPO support it now
             return
-
-        if args.multi_turn_scheduler:
-            if isinstance(args.multi_turn_scheduler, str):
-                assert args.multi_turn_scheduler in multi_turns
-                multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](max_turns=args.max_turns)
-                self.multi_turn_scheduler: MultiTurnScheduler = multi_turn_scheduler
-            else:
-                assert isinstance(args.multi_turn_scheduler, MultiTurnScheduler)
-                self.multi_turn_scheduler: MultiTurnScheduler = args.multi_turn_scheduler
+        if args.tree_rollout:
+            from swift.plugin.multi_turn import TreeRolloutScheduler
+            self.multi_turn_scheduler: MultiTurnScheduler = TreeRolloutScheduler(vllm_client=self.vllm_client, args=args)
+        elif isinstance(args.multi_turn_scheduler, str):
+            assert args.multi_turn_scheduler in multi_turns
+            multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](max_turns=args.max_turns)
+            self.multi_turn_scheduler: MultiTurnScheduler = multi_turn_scheduler
+        else:
+            assert isinstance(args.multi_turn_scheduler, MultiTurnScheduler)
+            self.multi_turn_scheduler: MultiTurnScheduler = args.multi_turn_scheduler
 
     @contextmanager
     def multi_turn_completion_length_context(self):
