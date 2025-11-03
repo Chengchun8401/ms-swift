@@ -108,6 +108,7 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             top_k=args.top_k,
             repetition_penalty=args.repetition_penalty,
             stop=args.stop_words,
+            logprobs=True,
             return_details=True)
 
     def _prepare_vllm(self):
@@ -724,13 +725,17 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
         if self.accelerator.is_main_process:
             if self.args.tree_rollout:
+                self.enable_server_multi_turn = True
+                print(f">>>>> Infer with TreeRolloutScheduler")
                 all_outputs: List[RolloutOutput] = self.multi_turn_scheduler.run(infer_request=all_requests,
                                                                                  request_config=request_config)
+                print(f">>>>> Infer finished with output size: {len(all_outputs)}")
             else:
                 all_outputs: List[RolloutOutput] = self._engine_infer(
                     infer_requests=all_requests, request_config=request_config)
             if len(all_outputs) != len(all_requests):
                 all_outputs = self._sort_by_request_id(all_outputs)
+                print(f">>>>> _sort_by_request_id done.")
         else:
             all_outputs = [None] * len(all_requests)
 
@@ -785,11 +790,11 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         return outputs
 
     def _engine_infer(
-        self,
-        infer_requests: List[RolloutInferRequest],
-        request_config: Optional[RequestConfig] = None,
-        *,
-        use_tqdm: Optional[bool] = False,
+            self,
+            infer_requests: List[RolloutInferRequest],
+            request_config: Optional[RequestConfig] = None,
+            *,
+            use_tqdm: Optional[bool] = False,
     ) -> List[RolloutOutput]:
         """Perform inference using configured engine"""
         with patch_profiling_context(self, 'generate'):
@@ -857,6 +862,7 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
             return input_data
 
+        print(f">>>>> dynamic_num_samples: {self.dynamic_num_samples}")
         if not self.dynamic_num_samples:
             if self.async_generate and not outputs:
                 return outputs
@@ -932,9 +938,13 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if not hasattr(args, 'multi_turn_scheduler'):
             # only GRPO support it now
             return
+        print(f">>>>> tree_rollout: {args.tree_rollout}")
         if args.tree_rollout:
             from swift.plugin.multi_turn import TreeRolloutScheduler
-            self.multi_turn_scheduler: MultiTurnScheduler = TreeRolloutScheduler(vllm_client=self.vllm_client, args=args)
+            self.multi_turn_scheduler: MultiTurnScheduler = TreeRolloutScheduler(vllm_client=self.vllm_client,
+                                                                                 max_tree_width=4, max_tree_deep=3,
+                                                                                 args=args)
+            print(f">>>>> successfully init TreeRolloutScheduler")
         elif isinstance(args.multi_turn_scheduler, str):
             assert args.multi_turn_scheduler in multi_turns
             multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](max_turns=args.max_turns)

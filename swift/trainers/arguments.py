@@ -148,7 +148,17 @@ class RLHFArgumentsMixin:
     chord_mu_valley: Optional[float] = None
 
     # TreePO
+    # tree_rollout 特性开关
     tree_rollout: bool = False
+    # 树最大宽度（每条输入最终最大产出条数）
+    max_tree_width = 8
+    # 树最大深度（每条输入最大推理轮次）
+    max_tree_deep = 12
+    # 根节点分差数
+    root_div_width = 1
+    # 树分差策略名称["fixed_avg", "logprob_weighted_div", "inverse_logprob_weighted_div", "norm_logprob_weighted_div", "norm_inv_logprob_weighted_div"]
+    tree_divergence_strategy = "logprob_weighted_div"
+
 
 
 @dataclass
