@@ -684,13 +684,12 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
         self.max_tree_width = max_tree_width
         self.max_tree_deep = max_tree_deep
-
-        self.default_divergence = 1
         self.max_divergence = max_divergence
         self.divergence_strategy = divergence_strategy
 
-        self.vllm_client = vllm_client
+        self.default_divergence = 1
 
+        self.vllm_client = vllm_client
         assert vllm_client is not None, 'vLLM Client can not be none.'
 
     def run(self,

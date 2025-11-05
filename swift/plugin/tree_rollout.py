@@ -159,6 +159,9 @@ class LogProbDivergence(AbstractDivergence):
 
     @classmethod
     def calc_weights(cls, root_idx, samples_to_go_deeper, **kwargs) -> List[float]:
+        """
+        In this strategy, weight is proportional to entropy
+        """
         entropies = []
         for sample in samples_to_go_deeper:
             log_probs = torch.tensor(sample.logprobs[-1])
@@ -177,8 +180,10 @@ class AvgDivergence(AbstractDivergence):
 
     @classmethod
     def calc_weights(cls, root_idx, samples_to_go_deeper, **kwargs) -> List[float]:
-        n = len(samples_to_go_deeper)
-        return [1.0] * n
+        avg = torch.ones(len(samples_to_go_deeper))
+        weights = torch.softmax(avg, dim=0)
+
+        return weights.tolist()
 
 
 DivergenceStrategyMapping = {
