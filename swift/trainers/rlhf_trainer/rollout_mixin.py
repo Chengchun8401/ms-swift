@@ -938,16 +938,19 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if not hasattr(args, 'multi_turn_scheduler'):
             # only GRPO support it now
             return
-        print(f">>>>> tree_rollout: {args.tree_rollout}")
-        if args.tree_rollout:
-            from swift.plugin.multi_turn import TreeRolloutScheduler
-            self.multi_turn_scheduler: MultiTurnScheduler = TreeRolloutScheduler(vllm_client=self.vllm_client,
-                                                                                 max_tree_width=4, max_tree_deep=3,
-                                                                                 args=args)
-            print(f">>>>> successfully init TreeRolloutScheduler")
-        elif isinstance(args.multi_turn_scheduler, str):
+        if isinstance(args.multi_turn_scheduler, str):
+
             assert args.multi_turn_scheduler in multi_turns
-            multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](max_turns=args.max_turns)
+            multi_turn_scheduler_class = multi_turns[args.multi_turn_scheduler]
+
+            if args.tree_rollout:
+                logger.info(f">>>>> tree_rollout enabled!")
+                from swift.plugin.multi_turn import TreeRolloutScheduler
+                assert issubclass(multi_turn_scheduler_class, TreeRolloutScheduler)
+
+            multi_turn_scheduler = multi_turns[args.multi_turn_scheduler](max_turns=args.max_turns,
+                                                                          vllm_client=self.vllm_client,
+                                                                          args=args)
             self.multi_turn_scheduler: MultiTurnScheduler = multi_turn_scheduler
         else:
             assert isinstance(args.multi_turn_scheduler, MultiTurnScheduler)
