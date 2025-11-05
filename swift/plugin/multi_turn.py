@@ -690,7 +690,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
         self.default_divergence = 1
 
         self.vllm_client = vllm_client
-        assert vllm_client is not None, 'vLLM Client can not be none.'
+
 
     def run(self,
             infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
@@ -727,6 +727,8 @@ class TreeRolloutScheduler(MultiTurnScheduler):
         step_efficiency_metrics = []
 
         while len(samples_to_infer) > 0:
+            print(f"【Debug】next step: {next_infer_step}, infer num: {len(samples_to_infer)}")
+
             vllm_inputs = [RolloutInferRequest(messages=sample.messages, uuid=sample.request_id) for sample in
                            samples_to_infer]
 
@@ -794,7 +796,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
 
                     budget = self.max_tree_width - len(root_finished_samples) - len(root_to_infer_samples)
 
-                    if budget > 0:
+                    if budget > 0 and len(root_to_infer_samples) > 0:
                         divergence_executor = DivergenceStrategyMapping[self.divergence_strategy]
                         if not divergence_executor:
                             raise ValueError(f"[Tree Rollout] The divergence strategy: {self.divergence_strategy} doesn't exist.")
@@ -808,7 +810,6 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                     count < self.max_tree_width for count in [len(value) for value in finished_samples.values()]):
                 samples_to_infer = self.fall_back_to_divergence(finished_samples)
 
-            print(f"【Debug】next step: {next_infer_step}, infer num: {len(samples_to_infer)}")
             next_infer_step += 1
             samples_to_infer = _increment_tree_idx_depth(samples_to_infer, next_infer_step)
 

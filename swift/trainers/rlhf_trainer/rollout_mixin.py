@@ -123,7 +123,7 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         self.use_fast_infer = args.use_vllm
         self.enable_offload = False
         self.use_gym_env = False
-        self.enable_server_multi_turn = False
+        self.enable_server_multi_turn = args.tree_rollout
         self.rollout_enable_lora = False
         self.vllm_use_async_engine = False
 
@@ -725,7 +725,6 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
         if self.accelerator.is_main_process:
             if self.args.tree_rollout:
-                self.enable_server_multi_turn = True
                 print(f">>>>> Infer with TreeRolloutScheduler")
                 all_outputs: List[RolloutOutput] = self.multi_turn_scheduler.run(infer_request=all_requests,
                                                                                  request_config=request_config)
@@ -742,7 +741,9 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         if self.enable_server_multi_turn:
             self.dynamic_num_samples = False
             outputs_count = [len(all_outputs)] if self.accelerator.is_main_process else [0]
+            print(f">>>> get the outputs_count: {outputs_count}")
             outputs_count = gather_object(outputs_count)[0]
+
             if outputs_count != len(all_requests):
                 self.dynamic_num_samples = True
                 if self.dynamic_sample:
@@ -752,9 +753,10 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             if not self.accelerator.is_main_process:
                 all_outputs = [None] * outputs_count
 
+        print(f">>> is_global_inputs: {is_global_inputs}")
         if not is_global_inputs:
             all_outputs = broadcast_object_list(all_outputs, from_process=0)
-
+            print(f">>> after broadcast")
             if not self.enable_server_multi_turn or not self.dynamic_num_samples:
                 start_idx = sum(all_requests_lengths[:self.accelerator.process_index])
                 end_idx = start_idx + all_requests_lengths[self.accelerator.process_index]
@@ -765,6 +767,7 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
         else:
             outputs = all_outputs if self.accelerator.is_main_process else []
 
+        print(">>>> before return")
         return outputs
 
     def _colocate_rollout(self, inputs: DataType, request_config: RequestConfig) -> List[RolloutOutput]:
