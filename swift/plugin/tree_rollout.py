@@ -1,11 +1,14 @@
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
-import copy
 from enum import Enum
 from typing import List
 
 import torch
 from modelscope.preprocessors.templates.utils import Messages
+
+from swift.llm.infer.protocol import ChatCompletionResponseChoice
+
 
 class SampleStatus(Enum):
     INITIAL = "initial"
@@ -33,6 +36,7 @@ class DataSampleTree:
 
     response_ids: List[int] = field(default_factory=list)
     all_response_ids: List[List[int]] = field(default_factory=list)
+    last_response: ChatCompletionResponseChoice = None
 
     token_count_per_step: List[int] = field(default_factory=list)
 
@@ -46,10 +50,15 @@ class DataSampleTree:
     def depth(self):
         return len(self.tree_idx.split('/')) - 1
 
-    def extend_response(self, response_id: List[int], response_text: str, logprobs: List[float]):
-        self.all_response_ids.append(response_id)
-        self.extend_response_text(response_text)
-        self.extend_logprobs(logprobs)
+    def extend_response(self, choice: ChatCompletionResponseChoice):
+        self.extend_response_text(choice.message.content)
+        self.extend_logprobs([item['logprob'] for item in choice.logprobs['content']])
+
+        self.all_response_ids.append(choice.token_ids)
+        self.token_count_per_step.append(len(choice.token_ids))
+
+        choice.logprobs = None
+        self.last_response = deepcopy(choice)
 
     def extend_response_text(self, response_text: str):
         self.messages.append({
@@ -60,9 +69,10 @@ class DataSampleTree:
     def extend_logprobs(self, logprobs: List[float]):
         self.logprobs.append(logprobs)
 
+
 def _repeat_list_interleave(any_list, repeat_times):
     # return [item for sublist in [[item] * repeat_times for item in any_list] for item in sublist]
-    return [copy.deepcopy(item) for sublist in [[item] * repeat_times for item in any_list] for item in sublist]
+    return [deepcopy(item) for sublist in [[item] * repeat_times for item in any_list] for item in sublist]
 
 def _increment_tree_idx_depth(
     samples: list[DataSampleTree],
@@ -73,7 +83,6 @@ def _increment_tree_idx_depth(
     return samples
 
 
-import re
 def extract_last_boxed(text):
     pattern = r'\\boxed\{((?:[^{}]|\{(?:[^{}]|\{[^{}]*\})*\})*)\}'
 

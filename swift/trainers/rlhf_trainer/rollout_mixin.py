@@ -30,7 +30,7 @@ from swift.llm import MultiModelKeys, RequestConfig, RolloutInferRequest
 from swift.llm.infer.protocol import ChatCompletionResponse, RolloutOutput
 from swift.plugin import MultiTurnScheduler, multi_turns
 from swift.trainers import RolloutTrainerArgumentsMixin
-from swift.utils import get_logger, is_vllm_available, remove_response, get_env_args
+from swift.utils import get_logger, is_vllm_available, remove_response
 from swift.utils.torch_utils import get_current_device
 from .rlhf_mixin import RLHFTrainerMixin
 from .utils import (FlattenedTensorBucket, TensorLoRARequest, _create_parameter_buckets,
@@ -727,28 +727,20 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
         if self.accelerator.is_main_process:
             if self.args.tree_rollout:
-                print(f">>[{get_rank()}] Infer with TreeRolloutScheduler")
                 all_outputs: List[RolloutOutput] = self.multi_turn_scheduler.run(infer_request=all_requests,
                                                                                  request_config=request_config)
-                print(f">>[{get_rank()}] Infer finished with output size: {len(all_outputs)}")
+                print(f">>>>> Infer finished with output size: {len(all_outputs)}")
             else:
                 all_outputs: List[RolloutOutput] = self._engine_infer(
                     infer_requests=all_requests, request_config=request_config)
             if len(all_outputs) != len(all_requests):
                 all_outputs = self._sort_by_request_id(all_outputs)
-                print(f">>[{get_rank()}] _sort_by_request_id done.")
         else:
-            if self.args.tree_rollout:
-                all_outputs = [None] * len(all_requests) * self.num_generations
-            else:
-                all_outputs = [None] * len(all_requests)
-
-        print(f">>[{get_rank()} self.enable_server_multi_turn={self.enable_server_multi_turn}]")
+            all_outputs = [None] * len(all_requests)
 
         if self.enable_server_multi_turn:
             self.dynamic_num_samples = False
             outputs_count = [len(all_outputs)] if self.accelerator.is_main_process else [0]
-            print(f">>[{get_rank()}] get the outputs_count: {outputs_count}")
             outputs_count = gather_object(outputs_count)[0]
 
             if outputs_count != len(all_requests):
@@ -762,7 +754,6 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
 
         if not is_global_inputs:
             all_outputs = broadcast_object_list(all_outputs, from_process=0)
-            print(f">>[{get_rank()}] after broadcast")
             if not self.enable_server_multi_turn or not self.dynamic_num_samples:
                 start_idx = sum(all_requests_lengths[:self.accelerator.process_index])
                 end_idx = start_idx + all_requests_lengths[self.accelerator.process_index]
@@ -1117,7 +1108,3 @@ class RolloutTrainerMixin(RLHFTrainerMixin):
             self._last_loaded_step = self.state.global_step
         results = self._infer_single_or_multi_turn(all_inputs, self.request_config, is_global_inputs=True)
         self._queue.put(DataCache(results))
-
-
-def get_rank():
-    return get_env_args("LOCAL_RANK", int, None)
