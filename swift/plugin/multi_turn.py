@@ -4,6 +4,7 @@ from abc import ABC
 from copy import deepcopy
 from dataclasses import asdict
 from typing import Any, Dict, List, Optional, Union
+from concurrent.futures import ThreadPoolExecutor, wait, ALL_COMPLETED
 
 import numpy as np
 
@@ -689,6 +690,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
         self.default_divergence = 1
 
         self.vllm_client = vllm_client
+        self.executor = ThreadPoolExecutor(max_workers=self.max_tree_width)
 
     def run(self,
             infer_request: Union[List[RolloutInferRequest], RolloutInferRequest],
@@ -777,11 +779,10 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                         )
                     )
                 else:
-                    self.step(sample, choice)
                     samples_to_infer.append(sample)
 
             # if we have budget, do divergence
-            if len(samples_to_infer) > 0:
+            if len(samples_to_infer) > 0 and self.self.max_divergence - 1 > 0:
                 for root_idx in finished_samples.keys():
                     root_to_infer_samples = [sample for sample in samples_to_infer if sample.root_node == root_idx]
                     root_finished_samples = finished_samples[root_idx]
@@ -795,13 +796,17 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                                 f"[Tree Rollout] The divergence strategy: {self.divergence_strategy} doesn't exist.")
 
                         divergence_samples = divergence_executor.apply(root_idx, root_to_infer_samples, budget,
-                                                                       self.max_divergence)
+                                                                       self.max_divergence - 1)
                         samples_to_infer.extend(divergence_samples)
 
             # before end loop, if finished_count < max_tree_width, fall back
             if len(samples_to_infer) == 0 and any(
                     count < self.max_tree_width for count in [len(value) for value in finished_samples.values()]):
                 samples_to_infer = self.fall_back_to_divergence(finished_samples)
+
+            # tools call etc
+            futures = [self.executor.submit(self.step, sample) for sample in samples_to_infer]
+            wait(futures, return_when=ALL_COMPLETED)
 
             next_infer_step += 1
             samples_to_infer = _increment_tree_idx_depth(samples_to_infer, next_infer_step)
@@ -813,7 +818,6 @@ class TreeRolloutScheduler(MultiTurnScheduler):
     def step(
             self,
             sample: DataSampleTree,
-            output: ChatCompletionResponseChoice,
             **kwargs
     ):
         """
@@ -861,7 +865,6 @@ class TreeRolloutScheduler(MultiTurnScheduler):
             if len(sample_list) >= self.max_tree_width:
                 continue
 
-            # todo 更完善的选择策略
             diff_count = self.max_tree_width - len(sample_list)
             import random
 
@@ -870,7 +873,6 @@ class TreeRolloutScheduler(MultiTurnScheduler):
             result_copy = deepcopy(result)
             for sample in result_copy:
                 sample.status = SampleStatus.TO_INFER
-                self.step(sample, sample.last_response)
 
             sample_to_infer.extend(result_copy)
 
