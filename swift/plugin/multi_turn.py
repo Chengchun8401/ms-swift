@@ -782,7 +782,7 @@ class TreeRolloutScheduler(MultiTurnScheduler):
                     samples_to_infer.append(sample)
 
             # if we have budget, do divergence
-            if len(samples_to_infer) > 0 and self.self.max_divergence - 1 > 0:
+            if len(samples_to_infer) > 0 and self.self.max_divergence > 1:
                 for root_idx in finished_samples.keys():
                     root_to_infer_samples = [sample for sample in samples_to_infer if sample.root_node == root_idx]
                     root_finished_samples = finished_samples[root_idx]
